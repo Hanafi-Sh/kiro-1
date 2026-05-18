@@ -14,6 +14,13 @@ from .translator import (
 from .streaming import StreamingResponseWriter, format_sse_event, format_sse_done
 from .errors import invalid_request_error, server_error
 from .deepseek_client import DeepSeekAPIError
+from .tool_calling import (
+    preprocess_request,
+    postprocess_response,
+    has_tool_call_response,
+    parse_tool_calls,
+    build_tool_call_stream_chunks,
+)
 
 
 AVAILABLE_MODELS = [
@@ -45,6 +52,39 @@ AVAILABLE_MODELS = [
         "parent": None,
     },
 ]
+
+
+def _emit_buffered_content_stream(writer, content, model, request_id):
+    """Emit buffered content as a normal streaming response.
+
+    Used when tool calling is active but no tool calls were detected.
+
+    Args:
+        writer: StreamingResponseWriter instance
+        content: full content string to emit
+        model: model name
+        request_id: request ID
+    """
+    # Emit first chunk with role
+    first_chunk = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": content},
+                "finish_reason": None,
+            }
+        ],
+    }
+    writer.write_event(first_chunk)
+
+    # Final chunk with finish_reason
+    final_chunk = create_final_stream_chunk(model=model, request_id=request_id)
+    writer.write_event(final_chunk)
+    writer.write_done()
 
 
 def handle_models():
@@ -88,9 +128,13 @@ def handle_chat_completions(request_body, deepseek_client, wfile=None):
     stream = request_body.get("stream", False)
     request_id = generate_request_id()
 
+    # Preprocess for tool calling (inject tools into prompt, convert tool messages)
+    processed_body, has_tools = preprocess_request(request_body)
+
     # Translate to DeepSeek format
-    deepseek_request = openai_to_deepseek(request_body)
+    deepseek_request = openai_to_deepseek(processed_body)
     model_class = deepseek_request["model_class"]
+    processed_messages = processed_body.get("messages", messages)
 
     temperature = deepseek_request.get("temperature", 1.0)
     max_tokens = deepseek_request.get("max_tokens")
@@ -100,25 +144,65 @@ def handle_chat_completions(request_body, deepseek_client, wfile=None):
         # Streaming response
         try:
             writer = StreamingResponseWriter(wfile)
-            is_first = True
 
-            for chunk in deepseek_client.chat_completion_stream(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-                model_class=model_class,
-            ):
-                openai_chunk = deepseek_stream_to_openai(
-                    chunk, model=model_name, request_id=request_id, is_first=is_first
-                )
-                writer.write_event(openai_chunk)
-                is_first = False
+            if has_tools:
+                # Buffer the entire response to detect tool calls
+                full_content = ""
+                for chunk in deepseek_client.chat_completion_stream(
+                    messages=processed_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    model_class=model_class,
+                ):
+                    choices = chunk.get("choices", [])
+                    if choices:
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            full_content += content
 
-            # Send final chunk with finish_reason
-            final_chunk = create_final_stream_chunk(model=model_name, request_id=request_id)
-            writer.write_event(final_chunk)
-            writer.write_done()
+                # Check if response contains tool calls
+                if has_tool_call_response(full_content):
+                    tool_calls = parse_tool_calls(full_content)
+                    if tool_calls:
+                        # Emit tool call streaming chunks
+                        chunks = build_tool_call_stream_chunks(
+                            tool_calls, model=model_name, request_id=request_id
+                        )
+                        for tc_chunk in chunks:
+                            writer.write_event(tc_chunk)
+                        writer.write_done()
+                    else:
+                        # Failed to parse, emit as normal content
+                        _emit_buffered_content_stream(
+                            writer, full_content, model_name, request_id
+                        )
+                else:
+                    # No tool calls, emit as normal content stream
+                    _emit_buffered_content_stream(
+                        writer, full_content, model_name, request_id
+                    )
+            else:
+                # Normal streaming (no tool calling)
+                is_first = True
+                for chunk in deepseek_client.chat_completion_stream(
+                    messages=processed_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    model_class=model_class,
+                ):
+                    openai_chunk = deepseek_stream_to_openai(
+                        chunk, model=model_name, request_id=request_id, is_first=is_first
+                    )
+                    writer.write_event(openai_chunk)
+                    is_first = False
+
+                # Send final chunk with finish_reason
+                final_chunk = create_final_stream_chunk(model=model_name, request_id=request_id)
+                writer.write_event(final_chunk)
+                writer.write_done()
         except DeepSeekAPIError as e:
             # For streaming errors, write an error event
             error_data = {
@@ -150,7 +234,7 @@ def handle_chat_completions(request_body, deepseek_client, wfile=None):
         # Non-streaming response
         try:
             deepseek_response = deepseek_client.chat_completion(
-                messages=messages,
+                messages=processed_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p,
@@ -159,6 +243,8 @@ def handle_chat_completions(request_body, deepseek_client, wfile=None):
             openai_response = deepseek_to_openai(
                 deepseek_response, model=model_name, request_id=request_id
             )
+            # Postprocess: detect tool calls in response
+            openai_response = postprocess_response(openai_response, has_tools)
             return 200, openai_response
         except DeepSeekAPIError as e:
             if e.status_code == 401:
