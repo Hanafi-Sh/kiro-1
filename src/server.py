@@ -1,5 +1,6 @@
 """HTTP server with routing for the OpenAI-compatible API gateway."""
 
+import hmac
 import json
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -49,7 +50,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         else:
             token = auth_header
 
-        if token != self.gateway_api_key:
+        if not hmac.compare_digest(token, self.gateway_api_key):
             status_code, body = authentication_error(
                 "Invalid API key. Provide a valid key via Authorization: Bearer <key> header."
             )
@@ -159,9 +160,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         stream = body.get("stream", False)
 
         if stream:
-            # Attempt upstream connection before sending SSE headers.
-            # handle_chat_completions will raise DeepSeekAPIError if connection fails,
-            # allowing us to return a proper HTTP error.
+            # Validate request format before committing SSE headers.
+            # This catches malformed requests early so we can return a proper
+            # HTTP error instead of an SSE error event on a 200 response.
             from .deepseek_client import DeepSeekAPIError
             from .handlers import handle_chat_completions_stream_preflight
 

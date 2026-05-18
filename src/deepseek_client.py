@@ -1,8 +1,11 @@
 """DeepSeek web chat API client using urllib."""
 
 import json
+import logging
 import urllib.request
 import urllib.error
+
+logger = logging.getLogger("gateway")
 
 
 class DeepSeekClient:
@@ -126,13 +129,17 @@ class DeepSeekClient:
                 sock = response.fp.raw._sock if hasattr(response.fp.raw, '_sock') else None
                 if sock is not None:
                     sock.settimeout(self.timeout)
-            except (AttributeError, OSError):
-                pass
+                else:
+                    logger.warning("Could not set socket read timeout: _sock attribute not found on response.fp.raw")
+            except (AttributeError, OSError) as e:
+                logger.warning("Could not set socket read timeout: %s", e)
         elif hasattr(response, 'fp') and hasattr(response.fp, '_sock'):
             try:
                 response.fp._sock.settimeout(self.timeout)
-            except (AttributeError, OSError):
-                pass
+            except (AttributeError, OSError) as e:
+                logger.warning("Could not set socket read timeout: %s", e)
+        else:
+            logger.warning("Could not set socket read timeout: response object lacks expected internal attributes")
 
         try:
             for line in response:
