@@ -208,5 +208,129 @@ class TestServerIntegration(unittest.TestCase):
             self.assertEqual(data["object"], "chat.completion")
 
 
+class TestServerAuth(unittest.TestCase):
+    """Tests for gateway-level API key authentication."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Start a test server with auth enabled."""
+        cls.mock_client = MagicMock()
+        cls.port = find_free_port()
+        cls.api_key = "test-secret-key-123"
+        cls.server = create_server("127.0.0.1", cls.port, cls.mock_client, gateway_api_key=cls.api_key)
+        cls.server_thread = threading.Thread(target=cls.server.serve_forever)
+        cls.server_thread.daemon = True
+        cls.server_thread.start()
+        time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        """Shut down the test server."""
+        cls.server.shutdown()
+        cls.server_thread.join(timeout=5)
+
+    @property
+    def base_url(self):
+        return f"http://127.0.0.1:{self.port}"
+
+    def test_no_auth_header_returns_401(self):
+        """Request without Authorization header should return 401."""
+        url = f"{self.base_url}/v1/models"
+        try:
+            urllib.request.urlopen(url)
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+            data = json.loads(e.read().decode())
+            self.assertIn("error", data)
+            self.assertEqual(data["error"]["type"], "authentication_error")
+
+    def test_wrong_key_returns_401(self):
+        """Request with wrong API key should return 401."""
+        url = f"{self.base_url}/v1/models"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", "Bearer wrong-key")
+        try:
+            urllib.request.urlopen(req)
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+
+    def test_correct_key_allows_access(self):
+        """Request with correct API key should succeed."""
+        url = f"{self.base_url}/v1/models"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {self.api_key}")
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode())
+            self.assertEqual(data["object"], "list")
+
+    def test_health_endpoint_no_auth_required(self):
+        """Health endpoint should work without auth."""
+        url = f"{self.base_url}/health"
+        with urllib.request.urlopen(url) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode())
+            self.assertEqual(data["status"], "ok")
+
+    def test_post_with_correct_key(self):
+        """POST request with correct key should succeed."""
+        self.mock_client.chat_completion.return_value = {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "Auth OK"},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        url = f"{self.base_url}/v1/chat/completions"
+        body = json.dumps({
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }).encode()
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {self.api_key}")
+
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_post_without_key_returns_401(self):
+        """POST request without key should return 401."""
+        url = f"{self.base_url}/v1/chat/completions"
+        body = json.dumps({
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }).encode()
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+
+        try:
+            urllib.request.urlopen(req)
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+
+    def test_streaming_missing_messages_returns_400_not_200(self):
+        """Streaming request with missing messages should return 400, not SSE stream."""
+        url = f"{self.base_url}/v1/chat/completions"
+        body = json.dumps({
+            "model": "deepseek-chat",
+            "stream": True,
+        }).encode()
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {self.api_key}")
+
+        try:
+            urllib.request.urlopen(req)
+            self.fail("Expected HTTPError")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+            data = json.loads(e.read().decode())
+            self.assertIn("messages", data["error"]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

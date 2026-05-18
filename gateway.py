@@ -72,10 +72,10 @@ def main():
         sys.exit(1)
 
     # Initialize DeepSeek client
-    client = DeepSeekClient(token=config.token, base_url=config.base_url)
+    client = DeepSeekClient(token=config.token, base_url=config.base_url, timeout=config.request_timeout)
 
     # Create and start server
-    server = create_server(config.host, config.port, client)
+    server = create_server(config.host, config.port, client, gateway_api_key=config.gateway_api_key)
 
     print(f"""
 {'='*60}

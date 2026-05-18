@@ -8,16 +8,18 @@ import urllib.error
 class DeepSeekClient:
     """Client for the DeepSeek web chat API."""
 
-    def __init__(self, token, base_url="https://chat.deepseek.com"):
+    def __init__(self, token, base_url="https://chat.deepseek.com", timeout=30):
         """Initialize the client.
 
         Args:
             token: Bearer token from DeepSeek browser session
             base_url: DeepSeek API base URL
+            timeout: Request timeout in seconds (default 30)
         """
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.api_url = f"{self.base_url}/api/v0/chat/completions"
+        self.timeout = timeout
 
     def _build_request(self, payload):
         """Build a urllib Request object for the DeepSeek API.
@@ -68,7 +70,7 @@ class DeepSeekClient:
         req = self._build_request(payload)
 
         try:
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:
                 body = response.read().decode("utf-8")
                 return json.loads(body)
         except urllib.error.HTTPError as e:
@@ -109,7 +111,7 @@ class DeepSeekClient:
         req.add_header("Accept", "text/event-stream")
 
         try:
-            response = urllib.request.urlopen(req)
+            response = urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             raise DeepSeekAPIError(e.code, error_body) from e
@@ -117,6 +119,20 @@ class DeepSeekClient:
             raise DeepSeekAPIError(503, str(e.reason)) from e
         except Exception as e:
             raise DeepSeekAPIError(500, str(e)) from e
+
+        # Set socket-level timeout for streaming reads to prevent indefinite blocking
+        if hasattr(response, 'fp') and hasattr(response.fp, 'raw'):
+            try:
+                sock = response.fp.raw._sock if hasattr(response.fp.raw, '_sock') else None
+                if sock is not None:
+                    sock.settimeout(self.timeout)
+            except (AttributeError, OSError):
+                pass
+        elif hasattr(response, 'fp') and hasattr(response.fp, '_sock'):
+            try:
+                response.fp._sock.settimeout(self.timeout)
+            except (AttributeError, OSError):
+                pass
 
         try:
             for line in response:

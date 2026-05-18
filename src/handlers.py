@@ -218,3 +218,46 @@ def handle_embeddings(request_body):
         "Embeddings are not supported by this gateway. DeepSeek web chat does not provide embedding functionality.",
         param="input",
     )
+
+
+def handle_chat_completions_stream_preflight(request_body, deepseek_client):
+    """Validate a streaming chat completions request before sending SSE headers.
+
+    This performs request validation so that errors can be returned as proper
+    HTTP error responses rather than being embedded in the SSE stream.
+
+    Args:
+        request_body: parsed JSON request body (dict)
+        deepseek_client: DeepSeekClient instance
+
+    Returns:
+        tuple (status_code, error_body) if there is an error, or None if OK to proceed.
+    """
+    if not isinstance(request_body, dict):
+        return invalid_request_error("Request body must be a JSON object.")
+
+    messages = request_body.get("messages")
+    if not messages or not isinstance(messages, list):
+        return invalid_request_error("'messages' is required and must be a non-empty array.", param="messages")
+
+    for msg in messages:
+        if not isinstance(msg, dict) or "role" not in msg:
+            return invalid_request_error("Each message must have a 'role' field.", param="messages")
+
+    return None
+
+
+def handle_completions_stream_preflight(request_body, deepseek_client):
+    """Validate a streaming legacy completions request before sending SSE headers.
+
+    Args:
+        request_body: parsed JSON request body (dict)
+        deepseek_client: DeepSeekClient instance
+
+    Returns:
+        tuple (status_code, error_body) if there is an error, or None if OK to proceed.
+    """
+    if not isinstance(request_body, dict):
+        return invalid_request_error("Request body must be a JSON object.")
+
+    return None

@@ -11,7 +11,7 @@ from .handlers import (
     handle_embeddings,
     handle_models,
 )
-from .errors import not_found_error, invalid_request_error, server_error, format_error_json
+from .errors import not_found_error, invalid_request_error, server_error, authentication_error, format_error_json
 
 logger = logging.getLogger("gateway")
 
@@ -27,10 +27,35 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     # Class-level reference to the DeepSeek client (set before server starts)
     deepseek_client = None
+    # Optional gateway API key for inbound auth (empty string means no auth)
+    gateway_api_key = ""
 
     def log_message(self, format, *args):
         """Override to use Python logging."""
         logger.info("%s - %s", self.address_string(), format % args)
+
+    def _check_auth(self):
+        """Check gateway-level authentication if GATEWAY_API_KEY is configured.
+
+        Returns:
+            True if authorized, False if unauthorized (response already sent).
+        """
+        if not self.gateway_api_key:
+            return True  # No auth configured, allow all requests
+
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        else:
+            token = auth_header
+
+        if token != self.gateway_api_key:
+            status_code, body = authentication_error(
+                "Invalid API key. Provide a valid key via Authorization: Bearer <key> header."
+            )
+            self._send_json_response(status_code, body)
+            return False
+        return True
 
     def _set_cors_headers(self):
         """Set CORS headers on the response."""
@@ -88,11 +113,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
         """Handle GET requests."""
         path = self.path.split("?")[0]  # Strip query string
 
+        if path == "/health" or path == "/":
+            self._send_json_response(200, {"status": "ok", "service": "deepseek4free-gateway"})
+            return
+
+        # Auth check for API endpoints
+        if not self._check_auth():
+            return
+
         if path == "/v1/models":
             status_code, body = handle_models()
             self._send_json_response(status_code, body)
-        elif path == "/health" or path == "/":
-            self._send_json_response(200, {"status": "ok", "service": "deepseek4free-gateway"})
         else:
             status_code, body = not_found_error(f"Endpoint not found: {path}")
             self._send_json_response(status_code, body)
@@ -100,6 +131,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Handle POST requests."""
         path = self.path.split("?")[0]  # Strip query string
+
+        # Auth check
+        if not self._check_auth():
+            return
 
         # Read request body
         body = self._read_body()
@@ -124,6 +159,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
         stream = body.get("stream", False)
 
         if stream:
+            # Attempt upstream connection before sending SSE headers.
+            # handle_chat_completions will raise DeepSeekAPIError if connection fails,
+            # allowing us to return a proper HTTP error.
+            from .deepseek_client import DeepSeekAPIError
+            from .handlers import handle_chat_completions_stream_preflight
+
+            error_result = handle_chat_completions_stream_preflight(body, self.deepseek_client)
+            if error_result is not None:
+                status_code, response_body = error_result
+                self._send_json_response(status_code, response_body)
+                return
+
             self._send_streaming_headers()
             handle_chat_completions(body, self.deepseek_client, wfile=self.wfile)
             self.close_connection = True
@@ -138,6 +185,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
         stream = body.get("stream", False)
 
         if stream:
+            from .handlers import handle_completions_stream_preflight
+
+            error_result = handle_completions_stream_preflight(body, self.deepseek_client)
+            if error_result is not None:
+                status_code, response_body = error_result
+                self._send_json_response(status_code, response_body)
+                return
+
             self._send_streaming_headers()
             handle_completions(body, self.deepseek_client, wfile=self.wfile)
             self.close_connection = True
@@ -148,17 +203,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._send_json_response(status_code, response_body)
 
 
-def create_server(host, port, deepseek_client):
+def create_server(host, port, deepseek_client, gateway_api_key=""):
     """Create and configure the gateway HTTP server.
 
     Args:
         host: bind host
         port: bind port
         deepseek_client: configured DeepSeekClient instance
+        gateway_api_key: optional API key for gateway-level auth
 
     Returns:
         ThreadingHTTPServer instance
     """
     GatewayHandler.deepseek_client = deepseek_client
+    GatewayHandler.gateway_api_key = gateway_api_key
     server = ThreadingHTTPServer((host, port), GatewayHandler)
     return server

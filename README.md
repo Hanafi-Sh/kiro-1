@@ -117,6 +117,8 @@ curl http://localhost:8080/v1/completions \
 | `SERVER_PORT` | `8080` | Server port |
 | `DEEPSEEK_BASE_URL` | `https://chat.deepseek.com` | DeepSeek API base URL |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `GATEWAY_API_KEY` | (empty) | Optional API key for gateway-level auth. If set, clients must send `Authorization: Bearer <key>`. If unset, all requests are allowed. |
+| `REQUEST_TIMEOUT` | `30` | Timeout in seconds for upstream DeepSeek API requests |
 
 Command-line arguments override environment variables:
 
@@ -153,8 +155,9 @@ python3 -m unittest discover -s tests -v
 
 ## Limitations
 
-- Token usage values are approximate estimates (based on character count / 4)
+- Token usage values in responses are approximate estimates (character count / 4) and should not be relied upon for billing or context-window tracking
 - Embeddings endpoint is not supported (DeepSeek web chat does not offer this)
+- Unsupported OpenAI message types (function_call, tool_calls, vision/image content blocks) are passed through to DeepSeek unchanged and may produce unexpected errors
 - The gateway depends on DeepSeek's web chat API which may change without notice
 - Rate limiting depends on DeepSeek's policies for the web chat interface
 - Token must be refreshed when the browser session expires

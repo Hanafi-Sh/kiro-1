@@ -10,6 +10,8 @@ from src.handlers import (
     handle_completions,
     handle_embeddings,
     handle_models,
+    handle_chat_completions_stream_preflight,
+    handle_completions_stream_preflight,
 )
 from src.deepseek_client import DeepSeekAPIError
 
@@ -221,6 +223,58 @@ class TestHandleEmbeddings(unittest.TestCase):
         self.assertIn("error", body)
         self.assertIn("message", body["error"])
         self.assertIn("type", body["error"])
+
+
+class TestStreamPreflight(unittest.TestCase):
+    """Tests for stream preflight validation."""
+
+    def setUp(self):
+        self.mock_client = MagicMock()
+
+    def test_chat_preflight_valid_request(self):
+        request = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True,
+        }
+        result = handle_chat_completions_stream_preflight(request, self.mock_client)
+        self.assertIsNone(result)
+
+    def test_chat_preflight_missing_messages(self):
+        request = {"model": "deepseek-chat", "stream": True}
+        result = handle_chat_completions_stream_preflight(request, self.mock_client)
+        self.assertIsNotNone(result)
+        status_code, body = result
+        self.assertEqual(status_code, 400)
+        self.assertIn("messages", body["error"]["message"])
+
+    def test_chat_preflight_invalid_body(self):
+        result = handle_chat_completions_stream_preflight("not a dict", self.mock_client)
+        self.assertIsNotNone(result)
+        status_code, body = result
+        self.assertEqual(status_code, 400)
+
+    def test_chat_preflight_invalid_message_format(self):
+        request = {
+            "messages": [{"content": "no role"}],
+            "stream": True,
+        }
+        result = handle_chat_completions_stream_preflight(request, self.mock_client)
+        self.assertIsNotNone(result)
+        status_code, body = result
+        self.assertEqual(status_code, 400)
+        self.assertIn("role", body["error"]["message"])
+
+    def test_completions_preflight_valid(self):
+        request = {"prompt": "Hello", "stream": True}
+        result = handle_completions_stream_preflight(request, self.mock_client)
+        self.assertIsNone(result)
+
+    def test_completions_preflight_invalid_body(self):
+        result = handle_completions_stream_preflight("not a dict", self.mock_client)
+        self.assertIsNotNone(result)
+        status_code, body = result
+        self.assertEqual(status_code, 400)
 
 
 if __name__ == "__main__":
